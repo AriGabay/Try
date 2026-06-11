@@ -1,0 +1,263 @@
+//@version=6
+indicator("NQ/ES SMT + IFVG + Volume [Session Open Divergence]", "SMT+IFVG+VOL",
+     overlay = true, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// All session times are defined in ISRAEL time (Asia/Jerusalem).
+// SMT logic: at each session open, compare the session's opening price to the
+// PREVIOUS session's close on both the chart symbol and the comparison symbol
+// (NQ vs ES). If they disagree (one opens above, the other below) -> SMT
+// divergence -> an "SMT window" stays active until the session ends.
+// An FVG inversion (IFVG) inside an active SMT window fires the signal:
+//   * bearish FVG broken upward  -> LONG
+//   * bullish FVG broken downward -> SHORT
+// Volume does not gate signals; it grades them (normal / + / ++).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const string TZ = "Asia/Jerusalem"
+
+// ── Inputs: symbols ──────────────────────────────────────────────────────────
+grpSym = "Symbols"
+compOverride = input.symbol("", "Comparison symbol (empty = auto NQ↔ES)", group = grpSym,
+     tooltip = "Leave empty: on an NQ chart ES1! is used, on an ES chart NQ1! is used.")
+
+// ── Inputs: sessions (Israel time) ───────────────────────────────────────────
+grpSess  = "Sessions — Israel time (Asia/Jerusalem)"
+useAsia  = input.bool(true, "Asia",  inline = "s1", group = grpSess)
+sessAsia = input.session("0100-0900", "", inline = "s1", group = grpSess)
+colAsia  = input.color(color.new(#3b6cff, 92), "", inline = "s1", group = grpSess)
+useLon   = input.bool(true, "London", inline = "s2", group = grpSess)
+sessLon  = input.session("0900-1530", "", inline = "s2", group = grpSess)
+colLon   = input.color(color.new(#f2a900, 92), "", inline = "s2", group = grpSess)
+useNYAM  = input.bool(true, "NY AM", inline = "s3", group = grpSess)
+sessNYAM = input.session("1530-2000", "", inline = "s3", group = grpSess)
+colNYAM  = input.color(color.new(#26c281, 92), "", inline = "s3", group = grpSess)
+useNYPM  = input.bool(true, "NY PM", inline = "s4", group = grpSess)
+sessNYPM = input.session("2000-2300", "", inline = "s4", group = grpSess)
+colNYPM  = input.color(color.new(#e74c3c, 92), "", inline = "s4", group = grpSess)
+showBg   = input.bool(true, "Session background colors", group = grpSess)
+showPrevClose = input.bool(true, "Show previous-session close line", group = grpSess)
+
+// ── Inputs: SMT ──────────────────────────────────────────────────────────────
+grpSmt = "SMT (session-open divergence)"
+showSmtLabels = input.bool(true, "Show SMT labels", group = grpSmt)
+colSmt        = input.color(color.new(#9b59b6, 0), "SMT label color", group = grpSmt)
+
+// ── Inputs: FVG / IFVG ───────────────────────────────────────────────────────
+grpFvg  = "FVG / IFVG"
+atrMult = input.float(0.25, "Minimum FVG width (× ATR 200)", minval = 0.0, step = 0.05, group = grpFvg,
+     tooltip = "Filters out insignificant gaps. 0 = keep every FVG.")
+invMode = input.string("Close", "Inversion trigger", options = ["Close", "Wick"], group = grpFvg,
+     tooltip = "Close = a candle must CLOSE through the gap (recommended). Wick = a wick through is enough.")
+maxGaps = input.int(5, "Max tracked gaps per side", minval = 1, maxval = 50, group = grpFvg)
+maxAge  = input.int(500, "Gap validity (bars)", minval = 10, group = grpFvg)
+showFvg     = input.bool(true, "Show FVG boxes", group = grpFvg)
+colBullFvg  = input.color(color.new(#26c281, 85), "Bullish FVG", inline = "c1", group = grpFvg)
+colBearFvg  = input.color(color.new(#e74c3c, 85), "Bearish FVG", inline = "c1", group = grpFvg)
+colIfvgBull = input.color(color.new(#00e676, 70), "Bullish IFVG", inline = "c2", group = grpFvg)
+colIfvgBear = input.color(color.new(#ff5252, 70), "Bearish IFVG", inline = "c2", group = grpFvg)
+
+// ── Inputs: volume grading ───────────────────────────────────────────────────
+grpVol   = "Volume grading"
+volLen   = input.int(20, "Volume SMA length", minval = 1, group = grpVol)
+thHigh   = input.float(1.5, "High volume threshold (× SMA)", minval = 1.0, step = 0.1, group = grpVol)
+thStrong = input.float(2.5, "Strong volume threshold (× SMA)", minval = 1.0, step = 0.1, group = grpVol)
+
+// ── Comparison symbol (auto NQ <-> ES) ───────────────────────────────────────
+isNQ    = str.contains(syminfo.root, "NQ")
+autoSym = isNQ ? "CME_MINI:ES1!" : "CME_MINI:NQ1!"
+compSym = compOverride == "" ? autoSym : compOverride
+compParts = str.split(compSym, ":")
+compName  = array.size(compParts) > 0 ? array.get(compParts, array.size(compParts) - 1) : compSym
+
+// ── Session engine ───────────────────────────────────────────────────────────
+// Returns the id of the session the current bar belongs to (na = outside all).
+f_sessionId() =>
+    tA = time(timeframe.period, sessAsia, TZ)
+    tL = time(timeframe.period, sessLon,  TZ)
+    tN = time(timeframe.period, sessNYAM, TZ)
+    tP = time(timeframe.period, sessNYPM, TZ)
+    int sid = na
+    if useAsia and not na(tA)
+        sid := 1
+    else if useLon and not na(tL)
+        sid := 2
+    else if useNYAM and not na(tN)
+        sid := 3
+    else if useNYPM and not na(tP)
+        sid := 4
+    sid
+
+// Tracks, for whichever symbol context it runs in: the current session id,
+// the current session's opening price, the close of the session that ended
+// before it, and whether this bar opens a new session.
+f_sessionData() =>
+    sid = f_sessionId()
+    var float sessOpen  = na
+    var float prevClose = na
+    var float lastClose = na
+    bool newSession = false
+    if nz(sid, -1) != nz(sid[1], -1)
+        if not na(sid[1])
+            lastClose := close[1]
+        if not na(sid)
+            newSession := true
+            sessOpen  := open
+            prevClose := lastClose
+    [sid, sessOpen, prevClose, newSession]
+
+f_sessName(int s) =>
+    s == 1 ? "Asia" : s == 2 ? "London" : s == 3 ? "NY AM" : s == 4 ? "NY PM" : "—"
+
+[sid, sOpen, sPrevClose, sNew] = f_sessionData()
+[cSid, cOpen, cPrevClose, cNew] = request.security(compSym, timeframe.period, f_sessionData(),
+     lookahead = barmerge.lookahead_off)
+
+// ── SMT divergence at session open ───────────────────────────────────────────
+var bool smtActive  = false
+var bool chartUp    = false
+var bool compUp     = false
+sessionChanged = nz(sid, -1) != nz(sid[1], -1)
+if sessionChanged
+    smtActive := false
+
+bool smtNew = false
+if sNew and not na(sPrevClose) and not na(cOpen) and not na(cPrevClose)
+    chartUp := sOpen > sPrevClose
+    compUp  := cOpen > cPrevClose
+    if chartUp != compUp
+        smtActive := true
+        smtNew    := true
+
+if smtNew and showSmtLabels
+    smtTxt = "SMT\n" + syminfo.root + (chartUp ? " ▲" : " ▼") + " / " + compName + (compUp ? " ▲" : " ▼")
+    label.new(bar_index, na, smtTxt, yloc = yloc.abovebar, style = label.style_label_down,
+         color = colSmt, textcolor = color.white, size = size.small)
+
+// Previous-session close reference line
+var line pcLine = na
+if sNew and not na(sPrevClose) and showPrevClose
+    pcLine := line.new(bar_index, sPrevClose, bar_index + 1, sPrevClose,
+         color = color.new(color.gray, 30), style = line.style_dotted, width = 1)
+if not na(pcLine) and not na(sid)
+    line.set_x2(pcLine, bar_index)
+
+// ── FVG detection and inversion (IFVG) ───────────────────────────────────────
+type Gap
+    box   bx
+    float top
+    float btm
+    bool  isBull
+    int   created
+    bool  inverted = false
+
+var gaps = array.new<Gap>()
+
+atrVal   = ta.atr(200)
+minWidth = nz(atrVal * atrMult)
+
+f_trimSide(bool side) =>
+    int cnt = 0
+    for i = 0 to array.size(gaps) - 1
+        if array.get(gaps, i).isBull == side
+            cnt += 1
+    if cnt > maxGaps
+        for i = 0 to array.size(gaps) - 1
+            g = array.get(gaps, i)
+            if g.isBull == side
+                box.delete(g.bx)
+                array.remove(gaps, i)
+                break
+
+newBullFvg = barstate.isconfirmed and low > high[2] and (low - high[2]) >= minWidth
+newBearFvg = barstate.isconfirmed and high < low[2] and (low[2] - high) >= minWidth
+
+if newBullFvg
+    b = box.new(bar_index - 2, low, bar_index, high[2],
+         border_color = showFvg ? colBullFvg : na, bgcolor = showFvg ? colBullFvg : na)
+    array.push(gaps, Gap.new(b, low, high[2], true, bar_index))
+    f_trimSide(true)
+if newBearFvg
+    b = box.new(bar_index - 2, low[2], bar_index, high,
+         border_color = showFvg ? colBearFvg : na, bgcolor = showFvg ? colBearFvg : na)
+    array.push(gaps, Gap.new(b, low[2], high, false, bar_index))
+    f_trimSide(false)
+
+srcUp = invMode == "Close" ? close : high
+srcDn = invMode == "Close" ? close : low
+
+bool bullIfvgNow = false  // bearish FVG inverted upward  -> bullish zone
+bool bearIfvgNow = false  // bullish FVG inverted downward -> bearish zone
+
+if barstate.isconfirmed and array.size(gaps) > 0
+    for i = array.size(gaps) - 1 to 0
+        g = array.get(gaps, i)
+        if bar_index - g.created > maxAge
+            box.delete(g.bx)
+            array.remove(gaps, i)
+            continue
+        box.set_right(g.bx, bar_index)
+        if not g.inverted
+            if g.isBull and srcDn < g.btm
+                g.inverted := true
+                box.set_bgcolor(g.bx, colIfvgBear)
+                box.set_border_color(g.bx, colIfvgBear)
+                bearIfvgNow := true
+            else if not g.isBull and srcUp > g.top
+                g.inverted := true
+                box.set_bgcolor(g.bx, colIfvgBull)
+                box.set_border_color(g.bx, colIfvgBull)
+                bullIfvgNow := true
+        else
+            // Inverted zone fully reclaimed -> no longer valid, drop it.
+            if g.isBull and close > g.top
+                box.delete(g.bx)
+                array.remove(gaps, i)
+            else if not g.isBull and close < g.btm
+                box.delete(g.bx)
+                array.remove(gaps, i)
+
+// ── Signals + volume grading ─────────────────────────────────────────────────
+volSma   = ta.sma(volume, volLen)
+volRatio = nz(volSma) > 0 ? volume / volSma : 0.0
+grade    = volRatio >= thStrong ? 2 : volRatio >= thHigh ? 1 : 0
+
+longSignal  = smtActive and bullIfvgNow
+shortSignal = smtActive and bearIfvgNow
+
+if longSignal
+    txt = grade == 2 ? "LONG ++" : grade == 1 ? "LONG +" : "LONG"
+    label.new(bar_index, na, txt, yloc = yloc.belowbar, style = label.style_label_up,
+         color = color.new(#00c853, grade == 0 ? 50 : 0), textcolor = color.white,
+         size = grade == 2 ? size.normal : size.small)
+if shortSignal
+    txt = grade == 2 ? "SHORT ++" : grade == 1 ? "SHORT +" : "SHORT"
+    label.new(bar_index, na, txt, yloc = yloc.abovebar, style = label.style_label_down,
+         color = color.new(#d50000, grade == 0 ? 50 : 0), textcolor = color.white,
+         size = grade == 2 ? size.normal : size.small)
+
+// ── Session backgrounds ──────────────────────────────────────────────────────
+color bgc = sid == 1 ? colAsia : sid == 2 ? colLon : sid == 3 ? colNYAM : sid == 4 ? colNYPM : na
+bgcolor(showBg ? bgc : na)
+
+// ── Info table ───────────────────────────────────────────────────────────────
+var table info = table.new(position.top_right, 2, 4, bgcolor = color.new(color.black, 80),
+     border_color = color.new(color.gray, 60), border_width = 1)
+if barstate.islast
+    table.cell(info, 0, 0, "Session",  text_color = color.gray,  text_size = size.tiny)
+    table.cell(info, 1, 0, f_sessName(sid), text_color = color.white, text_size = size.tiny)
+    table.cell(info, 0, 1, "SMT",      text_color = color.gray,  text_size = size.tiny)
+    table.cell(info, 1, 1, smtActive ? "ACTIVE" : "—",
+         text_color = smtActive ? color.new(#9b59b6, 0) : color.white, text_size = size.tiny)
+    table.cell(info, 0, 2, "Vol ×",    text_color = color.gray,  text_size = size.tiny)
+    table.cell(info, 1, 2, str.tostring(volRatio, "#.##"),
+         text_color = grade == 2 ? color.lime : grade == 1 ? color.yellow : color.white, text_size = size.tiny)
+    table.cell(info, 0, 3, "vs",       text_color = color.gray,  text_size = size.tiny)
+    table.cell(info, 1, 3, compName,   text_color = color.white, text_size = size.tiny)
+
+// ── Alerts ───────────────────────────────────────────────────────────────────
+alertcondition(longSignal,                "Long signal (SMT + bullish IFVG)",  "SMT+IFVG LONG signal")
+alertcondition(shortSignal,               "Short signal (SMT + bearish IFVG)", "SMT+IFVG SHORT signal")
+alertcondition(longSignal and grade == 2, "Strong long (high volume)",         "SMT+IFVG LONG ++ (strong volume)")
+alertcondition(shortSignal and grade == 2,"Strong short (high volume)",        "SMT+IFVG SHORT ++ (strong volume)")
+alertcondition(smtNew,                    "SMT divergence at session open",    "SMT divergence detected at session open")
