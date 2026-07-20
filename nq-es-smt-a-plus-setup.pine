@@ -190,11 +190,15 @@ tradeSessions = input.string("NY AM + London", "Setups allowed in",
 
 // -- 1n. Display --------------------------------------------------------------
 gShow          = "14 · Display"
-showLevels     = input.bool(true, "Liquidity level lines", group = gShow)
-showSweep      = input.bool(true, "Sweep markers",         group = gShow)
-showSmtLine    = input.bool(true, "SMT connector + label", group = gShow)
-showStruct     = input.bool(true, "MSS / CISD levels",     group = gShow)
-showZones      = input.bool(true, "FVG / IFVG boxes",      group = gShow)
+showLevels     = input.bool(true,  "Liquidity level lines", group = gShow)
+showSweep      = input.bool(false, "Sweep markers (every sweep — noisy)", group = gShow)
+showSmtLine    = input.bool(true,  "SMT connector on setups", group = gShow)
+showSmtLabels  = input.bool(false, "Standalone SMT label on every pivot (noisy)", group = gShow,
+     tooltip = "Off by default: on low timeframes NQ/ES diverge on almost every pivot, so this floods the chart. The graded setups are the real signal.")
+showStruct     = input.bool(true,  "MSS / CISD levels",     group = gShow)
+showZones      = input.bool(true,  "FVG / IFVG boxes",      group = gShow)
+zonesSetupOnly = input.bool(true,  "FVG boxes: only significant (>= 2x min size)", group = gShow,
+     tooltip = "On by default: hides the many tiny gaps that clutter low timeframes. Turn off to draw every FVG.")
 showTrade      = input.bool(true, "Entry / Stop / TP lines", group = gShow)
 showScoreLbl   = input.bool(true, "Setup score label",     group = gShow)
 showBg         = input.bool(true, "Session background",    group = gShow)
@@ -649,6 +653,7 @@ type Gap
 var gaps = array.new<Gap>()
 
 fvgMinSize = math.max(nz(atr) * fvgMinAtr, fvgMinTicks * syminfo.mintick)
+sigSize = nz(atr) * 0.2                       // "significant" gap for decluttered display
 newBull = low > high[2] and (low - high[2]) >= fvgMinSize
 newBear = high < low[2] and (low[2] - high) >= fvgMinSize
 
@@ -672,13 +677,15 @@ col_bearIfvg = color.new(#ff5252, 70)
 
 if barstate.isconfirmed
     if newBull
-        b = showZones ? box.new(bar_index - 2, low, bar_index, high[2], border_color = col_bullFvg, bgcolor = col_bullFvg) : na
+        drawIt = showZones and (not zonesSetupOnly or (low - high[2]) >= sigSize)
+        b = drawIt ? box.new(bar_index - 2, low, bar_index, high[2], border_color = col_bullFvg, bgcolor = col_bullFvg) : na
         array.push(gaps, Gap.new(b, low, high[2], true, bar_index))
         lastBullFvgTop := low
         lastBullFvgBtm := high[2]
         lastBullFvgBar := bar_index
     if newBear
-        b = showZones ? box.new(bar_index - 2, low[2], bar_index, high, border_color = col_bearFvg, bgcolor = col_bearFvg) : na
+        drawIt = showZones and (not zonesSetupOnly or (low[2] - high) >= sigSize)
+        b = drawIt ? box.new(bar_index - 2, low[2], bar_index, high, border_color = col_bearFvg, bgcolor = col_bearFvg) : na
         array.push(gaps, Gap.new(b, low[2], high, false, bar_index))
         lastBearFvgTop := low[2]
         lastBearFvgBtm := high
@@ -1193,8 +1200,8 @@ if barstate.isconfirmed and becameWaitNow and showThisGrade
     f_trimDrawings()
 
 // entry + sweep markers
-plotshape(barstate.isconfirmed and entryTriggeredNow and entryTrigDir == 1 and showTrade, "Long entry",  style = shape.triangleup,   location = location.belowbar, color = col_long,  size = size.small)
-plotshape(barstate.isconfirmed and entryTriggeredNow and entryTrigDir == -1 and showTrade, "Short entry", style = shape.triangledown, location = location.abovebar, color = col_short, size = size.small)
+plotshape(barstate.isconfirmed and entryTriggeredNow and entryTrigDir == 1 and showTrade and showThisGrade, "Long entry",  style = shape.triangleup,   location = location.belowbar, color = col_long,  size = size.small)
+plotshape(barstate.isconfirmed and entryTriggeredNow and entryTrigDir == -1 and showTrade and showThisGrade, "Short entry", style = shape.triangledown, location = location.abovebar, color = col_short, size = size.small)
 plotshape(barstate.isconfirmed and bullSweep and showSweep, "Bull sweep", style = shape.xcross, location = location.belowbar, color = color.new(color.teal, 0),   size = size.tiny)
 plotshape(barstate.isconfirmed and bearSweep and showSweep, "Bear sweep", style = shape.xcross, location = location.abovebar, color = color.new(color.maroon, 0), size = size.tiny)
 
@@ -1225,8 +1232,8 @@ if barstate.islast
     lnLonH := f_lvlLine(lnLonH, useLonLvl ? lonH : na, color.new(#3b6cff, 30))
     lnLonL := f_lvlLine(lnLonL, useLonLvl ? lonL : na, color.new(#3b6cff, 30))
 
-// SMT label at the confirmed pivot (non-repainting)
-if barstate.isconfirmed and showSmtLine and (bullSMT or bearSMT)
+// SMT label at the confirmed pivot (non-repainting). Off by default — noisy on LTF.
+if barstate.isconfirmed and showSmtLabels and (bullSMT or bearSMT)
     txt = (bullSMT ? "Bull SMT" : "Bear SMT") + "\n" + syminfo.root + " / " + compName
     label.new(bar_index, bullSMT ? low : high, txt, yloc = bullSMT ? yloc.belowbar : yloc.abovebar, style = bullSMT ? label.style_label_up : label.style_label_down, color = color.new(color.purple, 20), textcolor = color.white, size = size.tiny)
 

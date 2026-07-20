@@ -73,6 +73,17 @@ Liquidity Sweep → SMT → Displacement → MSS/CISD → FVG/IFVG → Retest �
 
 לצפייה גם ב‑A/B: שנו `Mode → Flexible` והתאימו `Flexible minimum score`.
 
+### תצוגה נקייה — למה לפעמים יש "הרבה סימונים"?
+האינדיקטור מפריד בין **שכבות אבחון** (כל SMT, כל Sweep, כל FVG) לבין **הסטאפ המדורג** (הסיגנל האמיתי).
+בטיים‑פריים נמוך (1 דקה) NQ/ES מתפצלים כמעט בכל פיבוט זעיר → מאות תוויות SMT ורמות FVG. לכן:
+
+- **ברירות המחדל כבר "רגועות":** `Standalone SMT labels` = Off, `Sweep markers` = Off, ו‑`FVG boxes: only significant` = On (מסתיר גאפים זעירים).
+- **עבדו ב‑3 או 5 דקות** (טווח היעד של האינדיקטור), לא ב‑1 דקה.
+- ב‑**Strict Mode** רק סטאפ **A+** מצויר (קווי Entry/Stop/TP + תווית ציון + משולש כניסה). B/C נשמרים ב‑Dashboard/Debug בלבד.
+- לתצוגה מינימלית לחלוטין: כבו גם `FVG / IFVG boxes` ו‑`Liquidity level lines`, והשאירו רק את הסטאפים המדורגים.
+
+> בצילום לדוגמה נראה סטאפ **SHORT בציון 69 = Grade B** (HTF Bias = Neutral/Mixed, Sweep על Swing‑High בלבד). זו **התנהגות תקינה** — האינדיקטור דירג אותו כבינוני; ב‑Strict הוא לא יצויר כסיגנל.
+
 ---
 
 ## 3. טבלת Inputs (עיקרי)
