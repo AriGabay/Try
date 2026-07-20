@@ -1,4 +1,15 @@
-# אינדיקטור NQ/ES — ‏SMT + IFVG + ווליום (Pine Script v6)
+# אינדיקטורים NQ/ES SMT (Pine Script v6)
+
+הריפו כולל שני אינדיקטורים:
+
+| קובץ | תיאור |
+|---|---|
+| [`nq-es-smt-a-plus-setup.pine`](nq-es-smt-a-plus-setup.pine) | **מערכת A+ מלאה** — Sweep → SMT → Displacement → MSS/CISD → FVG/IFVG → Retest → Entry → Stop/TP, עם דירוג 100 נק' ומכונת מצבים. תיעוד: [README-smt-a-plus.md](README-smt-a-plus.md) |
+| [`nq-es-smt-ifvg-volume.pine`](nq-es-smt-ifvg-volume.pine) | גרסה קלה (המתועדת למטה) — SMT בפתיחת סשן + IFVG + דירוג ווליום |
+
+---
+
+## אינדיקטור NQ/ES — ‏SMT + IFVG + ווליום
 
 אינדיקטור ל-TradingView שמזהה **חוסר קורלציה (SMT) בין NQ ל-ES בפתיחות סשנים**, ומאותת לונג/שורט באמצעות **IFVG ‏(Inversion Fair Value Gap)**, עם **דירוג עוצמה לפי ווליום**. כל שעות הסשנים מוגדרות **בשעון ישראל**.
 
