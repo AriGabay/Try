@@ -1184,10 +1184,10 @@ if barstate.isconfirmed and becameWaitNow and showThisGrade
         array.push(trLines, lsmt)
     if showScoreLbl
         dirTxt = S.dir == 1 ? "LONG" : "SHORT"
-        struct = (S.mssOk ? "MSS" : "") + (S.mssOk and S.cisdOk ? "+" : "") + (S.cisdOk ? "CISD" : "")
-        zone = S.ifvgOk ? "IFVG" : "FVG"
+        structTxt = (S.mssOk ? "MSS" : "") + (S.mssOk and S.cisdOk ? "+" : "") + (S.cisdOk ? "CISD" : "")
+        zoneTxt = S.ifvgOk ? "IFVG" : "FVG"
         head = S.grade + " " + dirTxt + " | Score: " + str.tostring(S.score)
-        sub = S.sweepName + " Sweep + " + (S.dir == 1 ? "Bull" : "Bear") + " SMT + " + struct + " + " + zone + " + " + str.tostring(S.rr, "#.#") + "R"
+        sub = S.sweepName + " Sweep + " + (S.dir == 1 ? "Bull" : "Bear") + " SMT + " + structTxt + " + " + zoneTxt + " + " + str.tostring(S.rr, "#.#") + "R"
         lab = label.new(bar_index, S.stop, head + "\n" + sub, yloc = yloc.price, style = S.dir == 1 ? label.style_label_up : label.style_label_down, color = S.grade == "A+" ? dirCol : color.new(dirCol, 35), textcolor = color.white, size = size.small)
         array.push(trLabels, lab)
     f_trimDrawings()
