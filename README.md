@@ -1,13 +1,12 @@
 # אינדיקטורים NQ/ES SMT (Pine Script v6)
 
-הריפו כולל שני אינדיקטורים:
+הריפו כולל שלושה אינדיקטורים:
 
 | קובץ | תיאור |
 |---|---|
 | [`nq-es-smt-a-plus-setup.pine`](nq-es-smt-a-plus-setup.pine) | **מערכת A+ מלאה** — Sweep → SMT → Displacement → MSS/CISD → FVG/IFVG → Retest → Entry → Stop/TP, עם דירוג 100 נק' ומכונת מצבים. תיעוד: [README-smt-a-plus.md](README-smt-a-plus.md) |
 | [`nq-es-smt-ifvg-volume.pine`](nq-es-smt-ifvg-volume.pine) | גרסה קלה (המתועדת למטה) — SMT בפתיחת סשן + IFVG + דירוג ווליום |
-
-וכן מדריך מתודולוגי: [README-breakout-retest.md](README-breakout-retest.md) — אסטרטגיית **Breakout Retest** (פריצה + רה-טסט): זיהוי, אישור, פריצות שווא וניהול סיכונים.
+| [`breakout-retest-signals.pine`](breakout-retest-signals.pine) | **Breakout Retest** — פריצה → Displacement → רה-טסט → כניסה, עם סימון **כניסה ויציאה לכל עסקה**, סטופ/יעדים, גודל פוזיציה וטבלת סטטיסטיקה. תיעוד: [README-breakout-retest.md](README-breakout-retest.md) |
 
 ---
 

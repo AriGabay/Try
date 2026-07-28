@@ -1,0 +1,519 @@
+//@version=6
+indicator("Breakout Retest — Entries & Exits", "BO-RETEST", overlay = true,
+     max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Breakout + retest lifecycle with explicit trade management.
+//
+//   level → breakout CLOSE (strength gate) → displacement away from the level
+//         → retest of the flipped level → confirmation candle → ENTRY
+//         → bar-by-bar management → EXIT (TP2 / stop / break-even / time stop)
+//
+// Every entry is drawn with its stop and both targets; every trade is closed
+// on chart with an exit marker showing the realized R multiple.
+// All state transitions happen on confirmed bars only (barstate.isconfirmed),
+// so nothing repaints: what you see on history is what fired live.
+//
+// Documentation: README-breakout-retest.md
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Inputs: levels ───────────────────────────────────────────────────────────
+grpLvl    = "1 · Levels"
+pvtLeft   = input.int(8, "Pivot left bars",  minval = 1, inline = "p", group = grpLvl)
+pvtRight  = input.int(8, "right", minval = 1, inline = "p", group = grpLvl,
+     tooltip = "A pivot is confirmed only after this many bars. That delay is what keeps the level non-repainting.")
+useDaily  = input.bool(true,  "Use previous day high / low (PDH / PDL)", group = grpLvl)
+useSess   = input.bool(false, "Use previous session high / low", inline = "s", group = grpLvl)
+sessSpec  = input.session("0100-0900", "", inline = "s", group = grpLvl,
+     tooltip = "Israel time. Default = Asia session; its high and low become levels for the rest of the day.")
+mergeAtr  = input.float(0.35, "Merge levels closer than (× ATR)", minval = 0.0, step = 0.05, group = grpLvl,
+     tooltip = "Nearby levels collapse into one and count as an extra touch instead of cluttering the chart.")
+maxLevels = input.int(14, "Max tracked levels", minval = 2, maxval = 40, group = grpLvl)
+lvlMaxAge = input.int(600, "Level validity (bars)", minval = 20, group = grpLvl)
+minTouch  = input.int(1, "Min touches before a break counts", minval = 1, maxval = 6, group = grpLvl,
+     tooltip = "1 = any confirmed level. Raise to 2–3 to trade only shelves price has already respected more than once.")
+
+// ── Inputs: breakout ─────────────────────────────────────────────────────────
+grpBO    = "2 · Breakout"
+atrLen   = input.int(14, "ATR length", minval = 1, group = grpBO)
+breakBuf = input.float(0.10, "Min close beyond level (× ATR)", minval = 0.0, step = 0.05, group = grpBO,
+     tooltip = "A wick through is never a breakout. The candle must CLOSE this far past the level.")
+strMode  = input.string("Body OR Volume", "Strength gate",
+     options = ["Body OR Volume", "Body AND Volume", "Body only", "Volume only", "Off"], group = grpBO)
+bodyMult = input.float(1.5, "Min body (× ATR)", minval = 0.0, step = 0.1, group = grpBO)
+volLen   = input.int(20, "Volume SMA length", minval = 1, inline = "v", group = grpBO)
+volMult  = input.float(1.5, "× SMA", minval = 0.0, step = 0.1, inline = "v", group = grpBO)
+minSide  = input.int(3, "Min bars on one side before a break", minval = 1, group = grpBO,
+     tooltip = "Stops price chopping across a level from firing a breakout every other bar.")
+lvlCool  = input.int(20, "Cooldown per level (bars)", minval = 0, group = grpBO)
+
+// ── Inputs: retest ───────────────────────────────────────────────────────────
+grpRT    = "3 · Retest"
+dispAtr  = input.float(1.0, "Min displacement before retest (× ATR)", minval = 0.0, step = 0.1, group = grpRT,
+     tooltip = "Price must actually travel away from the level. Without it, 'breakout and turn' looks like a retest.")
+zoneAtr  = input.float(0.30, "Retest zone half-width (× ATR)", minval = 0.05, step = 0.05, group = grpRT,
+     tooltip = "The retest is a zone, not a price. Limit orders on the exact tick miss constantly.")
+invAtr   = input.float(0.55, "Invalidate on close beyond (× ATR)", minval = 0.1, step = 0.05, group = grpRT,
+     tooltip = "A close this far back through the level cancels the setup — the breakout was absorbed.")
+minWait  = input.int(2,  "Min bars from break to retest", minval = 0, group = grpRT)
+maxWait  = input.int(30, "Max bars from break to retest", minval = 2, group = grpRT)
+needPrev = input.bool(true, "Confirmation must break the previous bar's extreme", group = grpRT,
+     tooltip = "Long: close above the previous bar's high. Filters out weak 'touch and hope' entries.")
+volFade  = input.bool(false, "Require fading volume on the confirmation bar", group = grpRT,
+     tooltip = "A lazy pullback means no real sellers. Stricter, and it costs you some valid trades.")
+
+// ── Inputs: risk & targets ───────────────────────────────────────────────────
+grpRisk  = "4 · Risk & targets"
+stopBuf  = input.float(0.30, "Stop buffer beyond retest extreme (× ATR)", minval = 0.0, step = 0.05, group = grpRisk,
+     tooltip = "A stop sitting exactly on the level is an invitation to be swept.")
+maxStop  = input.float(3.0, "Skip if stop wider than (× ATR, 0 = off)", minval = 0.0, step = 0.5, group = grpRisk)
+rr1      = input.float(1.0, "TP1 (R multiple)", minval = 0.1, step = 0.1, group = grpRisk)
+tp2Mode  = input.string("R multiple", "TP2 mode", options = ["R multiple", "Measured move"], group = grpRisk,
+     tooltip = "Measured move = the breakout leg (level → furthest excursion) projected from the entry price.")
+rr2      = input.float(3.0, "TP2 (R multiple)", minval = 0.2, step = 0.1, group = grpRisk)
+legMult  = input.float(1.0, "Measured-move multiplier", minval = 0.1, step = 0.1, group = grpRisk)
+minRR    = input.float(2.0, "Minimum R:R to take the trade", minval = 0.0, step = 0.1, group = grpRisk)
+
+// ── Inputs: trade management ─────────────────────────────────────────────────
+grpMgmt   = "5 · Trade management"
+oneOpen   = input.bool(true, "Only one open trade at a time", group = grpMgmt)
+partialPc = input.float(50, "Close at TP1 (%)", minval = 0, maxval = 100, step = 5, group = grpMgmt)
+moveBE    = input.bool(true, "Move stop to break-even after TP1", group = grpMgmt)
+beOffset  = input.float(0.05, "Break-even offset (× ATR)", minval = 0.0, step = 0.05, group = grpMgmt)
+useTrail  = input.bool(false, "Trail the remainder under swing pivots after TP1", group = grpMgmt)
+maxHold   = input.int(150, "Time stop (bars, 0 = off)", minval = 0, group = grpMgmt)
+
+// ── Inputs: position sizing ──────────────────────────────────────────────────
+grpSize  = "6 · Position sizing"
+acctSize = input.float(25000, "Account size", minval = 0, step = 1000, group = grpSize)
+riskPc   = input.float(0.75, "Risk per trade (%)", minval = 0.0, maxval = 10, step = 0.05, group = grpSize,
+     tooltip = "The stop distance decides the size — never the other way around.")
+
+// ── Inputs: display ──────────────────────────────────────────────────────────
+grpDisp    = "7 · Display"
+showLevels = input.bool(true,  "Level lines",  inline = "d1", group = grpDisp)
+showZones  = input.bool(true,  "Retest zones", inline = "d1", group = grpDisp)
+showTrades = input.bool(true,  "Entry / stop / target lines", inline = "d2", group = grpDisp)
+showLabels = input.bool(true,  "Entry & exit labels", inline = "d2", group = grpDisp)
+showStats  = input.bool(true,  "Statistics panel", inline = "d3", group = grpDisp)
+statsPos   = input.string("Top right", "", options = ["Top right", "Top left", "Bottom right", "Bottom left"], inline = "d3", group = grpDisp)
+colLong    = input.color(color.new(#26c281, 0),  "Long",   inline = "d4", group = grpDisp)
+colShort   = input.color(color.new(#e74c3c, 0),  "Short",  inline = "d4", group = grpDisp)
+colLvl     = input.color(color.new(#9aa4b2, 35), "Level",  inline = "d4", group = grpDisp)
+colStop    = input.color(color.new(#ff5252, 20), "Stop",   inline = "d5", group = grpDisp)
+colTgt     = input.color(color.new(#00e676, 20), "Target", inline = "d5", group = grpDisp)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Derived series — every ta.* call lives at global scope so its internal state
+// advances on every bar (calling them inside `if` blocks yields wrong values).
+// ─────────────────────────────────────────────────────────────────────────────
+atr    = ta.atr(atrLen)
+atrOk  = not na(atr) and atr > 0
+body   = math.abs(close - open)
+volSma = ta.sma(nz(volume), volLen)
+volRel = na(volSma) or volSma <= 0 ? 1.0 : nz(volume) / volSma
+
+ph = ta.pivothigh(pvtLeft, pvtRight)
+pl = ta.pivotlow(pvtLeft, pvtRight)
+lastPH = ta.valuewhen(not na(ph), ph, 0)
+lastPL = ta.valuewhen(not na(pl), pl, 0)
+
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_off)
+newDay     = ta.change(time("D")) != 0
+
+inSess = not na(time(timeframe.period, sessSpec, "Asia/Jerusalem"))
+var float sessHi     = na
+var float sessLo     = na
+var float prevSessHi = na
+var float prevSessLo = na
+sessEnded = not inSess and inSess[1]
+if inSess
+    sessHi := not inSess[1] or na(sessHi) ? high : math.max(sessHi, high)
+    sessLo := not inSess[1] or na(sessLo) ? low  : math.min(sessLo, low)
+if sessEnded
+    prevSessHi := sessHi
+    prevSessLo := sessLo
+    sessHi     := na
+    sessLo     := na
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A horizontal level with no fixed polarity: it flips role every time price
+// closes through it, which is exactly what makes the retest tradeable.
+type Level
+    float  price
+    int    bar
+    int    touches
+    int    side       // +1 price above, -1 below
+    int    sideBars   // consecutive confirmed bars on that side
+    int    lastBreak
+    line   ln
+    string src
+
+// A breakout still proving itself: displacement first, then a retest.
+type Setup
+    int   dir         // +1 long, -1 short
+    float level
+    int   breakBar
+    float extreme     // furthest excursion since the break = the breakout leg
+    bool  displaced
+    bool  inZone
+    float retestExt   // lowest low (long) / highest high (short) since the zone was tagged
+    box   zn
+
+// A live position, managed bar by bar until it is closed on chart.
+type Trade
+    int   dir
+    float entry
+    float stop
+    float tp1
+    float tp2
+    float risk
+    int   entryBar
+    bool  tp1Hit
+    line  lnE
+    line  lnS
+    line  lnT1
+    line  lnT2
+
+var levels = array.new<Level>()
+var setups = array.new<Setup>()
+var Trade T = na
+
+// Statistics
+var int   nTrades = 0
+var int   nWin    = 0
+var int   nLoss   = 0
+var int   nBE     = 0
+var float sumR    = 0.0
+var float bestR   = 0.0
+var float worstR  = 0.0
+
+// Signals exposed to plotshape / alertcondition
+sigLong  = false
+sigShort = false
+sigExit  = false
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Level bookkeeping
+// ─────────────────────────────────────────────────────────────────────────────
+addLevel(float p, int atBar, string src) =>
+    if not na(p) and atrOk
+        merged = false
+        if array.size(levels) > 0
+            for i = 0 to array.size(levels) - 1
+                L = array.get(levels, i)
+                if math.abs(L.price - p) <= mergeAtr * atr
+                    // Same shelf being retested: keep the original price, add a touch.
+                    L.touches := L.touches + 1
+                    merged := true
+                    break
+        if not merged
+            ln = showLevels ? line.new(atBar, p, bar_index, p, color = colLvl, style = line.style_dotted, width = 1) : line(na)
+            array.push(levels, Level.new(p, atBar, 1, close > p ? 1 : -1, 0, -100000, ln, src))
+            if array.size(levels) > maxLevels
+                old = array.shift(levels)
+                line.delete(old.ln)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main state machine — confirmed bars only, so nothing repaints
+// ─────────────────────────────────────────────────────────────────────────────
+if barstate.isconfirmed and atrOk
+
+    // ── 1. Harvest new levels ────────────────────────────────────────────────
+    if not na(ph)
+        addLevel(ph, bar_index - pvtRight, "PVT")
+    if not na(pl)
+        addLevel(pl, bar_index - pvtRight, "PVT")
+    if useDaily and newDay
+        addLevel(pdh, bar_index, "PDH")
+        addLevel(pdl, bar_index, "PDL")
+    if useSess and sessEnded
+        addLevel(prevSessHi, bar_index, "SESS-H")
+        addLevel(prevSessLo, bar_index, "SESS-L")
+
+    // ── 2. Age out levels, count touches, detect breakouts ───────────────────
+    strongBody = body >= bodyMult * atr
+    strongVol  = volRel >= volMult
+    strength = switch strMode
+        "Body OR Volume"  => strongBody or strongVol
+        "Body AND Volume" => strongBody and strongVol
+        "Body only"       => strongBody
+        "Volume only"     => strongVol
+        => true
+
+    if array.size(levels) > 0
+        for i = array.size(levels) - 1 to 0
+            L = array.get(levels, i)
+            if bar_index - L.bar > lvlMaxAge
+                line.delete(L.ln)
+                array.remove(levels, i)
+                continue
+
+            if showLevels and not na(L.ln)
+                line.set_x2(L.ln, bar_index)
+                line.set_color(L.ln, color.new(colLvl, math.max(0, 55 - L.touches * 8)))
+                line.set_width(L.ln, L.touches >= 3 ? 2 : 1)
+
+            newSide = close > L.price ? 1 : -1
+            if newSide == L.side
+                L.sideBars := L.sideBars + 1
+                // A bar that pierces the level without closing through it is a test.
+                if high >= L.price and low <= L.price
+                    L.touches := L.touches + 1
+            else
+                far      = math.abs(close - L.price) >= breakBuf * atr
+                seasoned = L.sideBars >= minSide and L.touches >= minTouch
+                cooled   = bar_index - L.lastBreak >= lvlCool
+                if far and seasoned and cooled and strength
+                    L.lastBreak := bar_index
+                    zn = showZones ? box.new(bar_index, L.price + zoneAtr * atr, bar_index + 1, L.price - zoneAtr * atr,
+                             border_color = color.new(newSide == 1 ? colLong : colShort, 55),
+                             bgcolor     = color.new(newSide == 1 ? colLong : colShort, 88)) : box(na)
+                    array.push(setups, Setup.new(newSide, L.price, bar_index, close, false, false, float(na), zn))
+                    if array.size(setups) > 6
+                        drop = array.shift(setups)
+                        box.delete(drop.zn)
+                if far
+                    L.side     := newSide
+                    L.sideBars := 0
+
+    // ── 3. Drive pending setups: displacement → retest → confirmation ────────
+    entryDir = 0
+    float entryPx  = na
+    float entryStp = na
+    float entryLeg = na
+
+    if array.size(setups) > 0
+        for i = array.size(setups) - 1 to 0
+            S    = array.get(setups, i)
+            d    = S.dir
+            age  = bar_index - S.breakBar
+            kill = false
+
+            S.extreme := d == 1 ? math.max(S.extreme, high) : math.min(S.extreme, low)
+            if not S.displaced and (S.extreme - S.level) * d >= dispAtr * atr
+                S.displaced := true
+
+            // The breakout was absorbed — price closed back through the level.
+            if (close - S.level) * d <= -invAtr * atr
+                kill := true
+            // Never came back, or never went anywhere.
+            if age > maxWait
+                kill := true
+
+            if not kill and S.displaced and age >= minWait
+                zTop = S.level + zoneAtr * atr
+                zBot = S.level - zoneAtr * atr
+                if showZones and not na(S.zn)
+                    box.set_right(S.zn, bar_index)
+
+                if not S.inZone and (d == 1 ? low <= zTop : high >= zBot)
+                    S.inZone    := true
+                    S.retestExt := d == 1 ? low : high
+
+                if S.inZone
+                    S.retestExt := d == 1 ? math.min(S.retestExt, low) : math.max(S.retestExt, high)
+                    rejection = d == 1 ? close > open and close > S.level : close < open and close < S.level
+                    prevOk    = not needPrev or (d == 1 ? close > high[1] : close < low[1])
+                    fadeOk    = not volFade or nz(volume) < nz(volume[1])
+                    if rejection and prevOk and fadeOk
+                        stp  = S.retestExt - d * stopBuf * atr
+                        rsk  = (close - stp) * d
+                        wide = maxStop > 0 and rsk > maxStop * atr
+                        if rsk > 0 and not wide
+                            entryDir := d
+                            entryPx  := close
+                            entryStp := stp
+                            entryLeg := math.abs(S.extreme - S.level)
+                            kill     := true
+
+            if kill
+                box.delete(S.zn)
+                array.remove(setups, i)
+
+    // ── 4. Manage the open trade — checked BEFORE any new entry ──────────────
+    if not na(T)
+        d = T.dir
+        float exitPx  = na
+        string exitTx = ""
+
+        // Conservative intrabar assumption: when a bar's range contains both
+        // the stop and a target, assume the stop filled first.
+        hitStop = d == 1 ? low <= T.stop : high >= T.stop
+        hitTp1  = not T.tp1Hit and (d == 1 ? high >= T.tp1 : low <= T.tp1)
+        hitTp2  = d == 1 ? high >= T.tp2 : low <= T.tp2
+
+        if hitStop
+            exitPx := T.stop
+            exitTx := T.tp1Hit and moveBE ? "BE" : "SL"
+        else
+            if hitTp1
+                T.tp1Hit := true
+                if showLabels and partialPc > 0
+                    label.new(bar_index, T.tp1, str.format("TP1 +{0,number,#.##}R · {1,number,#}%", rr1, partialPc),
+                         style     = d == 1 ? label.style_label_down : label.style_label_up,
+                         color     = color.new(colTgt, 25), textcolor = color.white, size = size.tiny)
+                if moveBE
+                    T.stop := T.entry + d * beOffset * atr
+                    // Close the original stop segment and start a new one so the
+                    // chart shows where the stop was moved, not a sloped line.
+                    if showTrades and not na(T.lnS)
+                        line.set_x2(T.lnS, bar_index)
+                        T.lnS := line.new(bar_index, T.stop, bar_index + 1, T.stop, color = colStop, width = 2)
+            if useTrail and T.tp1Hit
+                sw = d == 1 ? lastPL : lastPH
+                if not na(sw)
+                    cand = sw - d * stopBuf * atr
+                    if (cand - T.stop) * d > 0 and (close - cand) * d > 0
+                        T.stop := cand
+                        if showTrades and not na(T.lnS)
+                            line.set_y1(T.lnS, T.stop)
+                            line.set_y2(T.lnS, T.stop)
+            if hitTp2
+                exitPx := T.tp2
+                exitTx := "TP2"
+            else if maxHold > 0 and bar_index - T.entryBar >= maxHold
+                exitPx := close
+                exitTx := "TIME"
+
+        if showTrades
+            line.set_x2(T.lnE,  bar_index)
+            line.set_x2(T.lnS,  bar_index)
+            line.set_x2(T.lnT1, bar_index)
+            line.set_x2(T.lnT2, bar_index)
+
+        if not na(exitPx)
+            finalR = (exitPx - T.entry) * d / T.risk
+            pc     = partialPc / 100.0
+            totalR = T.tp1Hit ? pc * rr1 + (1 - pc) * finalR : finalR
+
+            nTrades += 1
+            sumR    += totalR
+            bestR   := math.max(bestR, totalR)
+            worstR  := math.min(worstR, totalR)
+            if totalR > 0.05
+                nWin += 1
+            else if totalR < -0.05
+                nLoss += 1
+            else
+                nBE += 1
+
+            if showLabels
+                label.new(bar_index, exitPx,
+                     str.format("EXIT {0}\n{1}{2,number,#.##}R", exitTx, totalR >= 0 ? "+" : "", totalR),
+                     style     = d == 1 ? label.style_label_down : label.style_label_up,
+                     color     = color.new(totalR > 0.05 ? colTgt : colStop, 15),
+                     textcolor = color.white, size = size.small)
+            if showTrades and not na(T.lnE)
+                line.set_style(T.lnE, line.style_solid)
+                line.set_color(T.lnE, color.new(color.gray, 40))
+
+            alert(str.format("{0} EXIT {1} @ {2} → {3}R", d == 1 ? "LONG" : "SHORT", exitTx,
+                 str.tostring(exitPx, format.mintick), str.tostring(totalR, "#.##")), alert.freq_once_per_bar)
+            sigExit := true
+            T := na
+
+    // ── 5. Open a new trade ──────────────────────────────────────────────────
+    if entryDir != 0 and (not oneOpen or na(T))
+        d   = entryDir
+        rsk = (entryPx - entryStp) * d
+        tp1 = entryPx + d * rr1 * rsk
+        float tp2 = tp2Mode == "R multiple" ? entryPx + d * rr2 * rsk : entryPx + d * legMult * entryLeg
+        // A measured move that lands inside TP1 is not a target.
+        tp2 := d == 1 ? math.max(tp2, tp1 + 0.5 * rsk) : math.min(tp2, tp1 - 0.5 * rsk)
+        rrOut = (tp2 - entryPx) * d / rsk
+
+        if rrOut >= minRR
+            lnE  = showTrades ? line.new(bar_index, entryPx,  bar_index + 1, entryPx,  color = color.new(color.gray, 20), style = line.style_dashed) : line(na)
+            lnS  = showTrades ? line.new(bar_index, entryStp, bar_index + 1, entryStp, color = colStop, width = 2) : line(na)
+            lnT1 = showTrades ? line.new(bar_index, tp1,      bar_index + 1, tp1,      color = color.new(colTgt, 45), style = line.style_dotted) : line(na)
+            lnT2 = showTrades ? line.new(bar_index, tp2,      bar_index + 1, tp2,      color = colTgt, width = 2) : line(na)
+            T := Trade.new(d, entryPx, entryStp, tp1, tp2, rsk, bar_index, false, lnE, lnS, lnT1, lnT2)
+
+            qty = riskPc > 0 and syminfo.pointvalue > 0 ? acctSize * riskPc / 100.0 / (rsk * syminfo.pointvalue) : na
+            if showLabels
+                label.new(bar_index, d == 1 ? low : high,
+                     str.format("{0} @ {1}\nSL {2} · TP2 {3}\n{4,number,#.##}R{5}",
+                          d == 1 ? "▲ LONG" : "▼ SHORT",
+                          str.tostring(entryPx,  format.mintick),
+                          str.tostring(entryStp, format.mintick),
+                          str.tostring(tp2,      format.mintick),
+                          rrOut,
+                          na(qty) ? "" : str.format(" · {0,number,#.##} units", qty)),
+                     style     = d == 1 ? label.style_label_up : label.style_label_down,
+                     color     = color.new(d == 1 ? colLong : colShort, 12),
+                     textcolor = color.white, size = size.small)
+
+            sigLong  := d == 1
+            sigShort := d == -1
+            alert(str.format("{0} ENTRY @ {1} | SL {2} | TP1 {3} | TP2 {4} | {5}R",
+                 d == 1 ? "LONG" : "SHORT",
+                 str.tostring(entryPx,  format.mintick),
+                 str.tostring(entryStp, format.mintick),
+                 str.tostring(tp1,      format.mintick),
+                 str.tostring(tp2,      format.mintick),
+                 str.tostring(rrOut, "#.##")), alert.freq_once_per_bar)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plots & alert conditions
+// ─────────────────────────────────────────────────────────────────────────────
+plotshape(sigLong,  "Long entry",  style = shape.triangleup,   location = location.belowbar, color = colLong,  size = size.small)
+plotshape(sigShort, "Short entry", style = shape.triangledown, location = location.abovebar, color = colShort, size = size.small)
+plotshape(sigExit,  "Trade exit",  style = shape.xcross,       location = location.top,      color = color.new(color.orange, 0), size = size.tiny)
+
+alertcondition(sigLong,  "Breakout retest — LONG entry",  "Breakout retest LONG entry on {{ticker}}")
+alertcondition(sigShort, "Breakout retest — SHORT entry", "Breakout retest SHORT entry on {{ticker}}")
+alertcondition(sigExit,  "Breakout retest — trade exit",  "Breakout retest trade closed on {{ticker}}")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Statistics panel
+//
+// These R figures are an on-chart tally, not a backtest: fills are assumed at
+// the exact stop/target price, there is no slippage or commission, and a bar
+// holding both the stop and a target is scored as a stop. Use it to compare
+// settings against each other — not as a performance report.
+// ─────────────────────────────────────────────────────────────────────────────
+f_pos(string s) =>
+    switch s
+        "Top left"     => position.top_left
+        "Bottom right" => position.bottom_right
+        "Bottom left"  => position.bottom_left
+        => position.top_right
+
+var table stats = na
+if showStats and barstate.islast
+    if na(stats)
+        stats := table.new(f_pos(statsPos), 2, 8,
+             bgcolor     = color.new(color.black, 80),
+             border_color = color.new(color.gray, 55), border_width = 1,
+             frame_color = color.new(color.gray, 40),  frame_width = 1)
+
+    winPc = nTrades > 0 ? 100.0 * nWin / nTrades : 0.0
+    avgR  = nTrades > 0 ? sumR / nTrades : 0.0
+
+    // Built outside the table calls: reading a field of an na object errors.
+    string openTxt = "—"
+    color  openCol = color.silver
+    if not na(T)
+        openTxt := str.format("{0} @ {1}", T.dir == 1 ? "LONG" : "SHORT", str.tostring(T.entry, format.mintick))
+        openCol := T.dir == 1 ? colLong : colShort
+
+    table.cell(stats, 0, 0, "BREAKOUT RETEST", text_color = color.white, text_size = size.small, bgcolor = color.new(color.gray, 60))
+    table.cell(stats, 1, 0, str.tostring(nTrades) + " trades", text_color = color.white, text_size = size.small, bgcolor = color.new(color.gray, 60))
+    table.cell(stats, 0, 1, "Win rate", text_color = color.silver, text_size = size.small)
+    table.cell(stats, 1, 1, str.tostring(winPc, "#.#") + "%", text_color = winPc >= 50 ? colTgt : color.white, text_size = size.small)
+    table.cell(stats, 0, 2, "W / L / BE", text_color = color.silver, text_size = size.small)
+    table.cell(stats, 1, 2, str.format("{0} / {1} / {2}", nWin, nLoss, nBE), text_color = color.white, text_size = size.small)
+    table.cell(stats, 0, 3, "Total R", text_color = color.silver, text_size = size.small)
+    table.cell(stats, 1, 3, str.tostring(sumR, "#.##") + "R", text_color = sumR >= 0 ? colTgt : colStop, text_size = size.small)
+    table.cell(stats, 0, 4, "Avg R / trade", text_color = color.silver, text_size = size.small)
+    table.cell(stats, 1, 4, str.tostring(avgR, "#.##") + "R", text_color = avgR >= 0 ? colTgt : colStop, text_size = size.small)
+    table.cell(stats, 0, 5, "Best / worst", text_color = color.silver, text_size = size.small)
+    table.cell(stats, 1, 5, str.format("{0,number,#.##} / {1,number,#.##}", bestR, worstR), text_color = color.white, text_size = size.small)
+    table.cell(stats, 0, 6, "Pending setups", text_color = color.silver, text_size = size.small)
+    table.cell(stats, 1, 6, str.tostring(array.size(setups)), text_color = color.white, text_size = size.small)
+    table.cell(stats, 0, 7, "Open position", text_color = color.silver, text_size = size.small)
+    table.cell(stats, 1, 7, openTxt, text_color = openCol, text_size = size.small)
