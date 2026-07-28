@@ -7,6 +7,8 @@
 | [`nq-es-smt-a-plus-setup.pine`](nq-es-smt-a-plus-setup.pine) | **מערכת A+ מלאה** — Sweep → SMT → Displacement → MSS/CISD → FVG/IFVG → Retest → Entry → Stop/TP, עם דירוג 100 נק' ומכונת מצבים. תיעוד: [README-smt-a-plus.md](README-smt-a-plus.md) |
 | [`nq-es-smt-ifvg-volume.pine`](nq-es-smt-ifvg-volume.pine) | גרסה קלה (המתועדת למטה) — SMT בפתיחת סשן + IFVG + דירוג ווליום |
 
+וכן מדריך מתודולוגי: [README-breakout-retest.md](README-breakout-retest.md) — אסטרטגיית **Breakout Retest** (פריצה + רה-טסט): זיהוי, אישור, פריצות שווא וניהול סיכונים.
+
 ---
 
 ## אינדיקטור NQ/ES — ‏SMT + IFVG + ווליום
